@@ -65,6 +65,11 @@ def _parse_timeframe(tf: str) -> tuple[TimeFrame, timedelta]:
     return TimeFrame(amount, unit), duration(amount)
 
 
+def timeframe_duration(timeframe: str) -> timedelta:
+    """Return the wall-clock duration of one bar of `timeframe` (e.g. '1Hour')."""
+    return _parse_timeframe(timeframe)[1]
+
+
 def make_client(api_key: str, api_secret: str) -> CryptoHistoricalDataClient:
     return CryptoHistoricalDataClient(api_key, api_secret)
 

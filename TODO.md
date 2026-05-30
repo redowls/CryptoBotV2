@@ -123,42 +123,58 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
 
 ---
 
-## Phase 3 — Execution + Initial TP/SL (paper only)
+## Phase 3 — Execution + Initial TP/SL (paper only) — CODE COMPLETE, green-light PASSED 2026-05-30
+
+> The 2026-05-30 TLS-interception block (Alpaca cert `Hostname mismatch`) was
+> resolved; `check_connectivity` is green again. The green-light then passed on
+> a forced paper entry (see below). NOTE: that entry left BTC/USD position #1
+> OPEN on the paper account, unmanaged (no Position Manager until Phase 4) — it
+> was a synthetic `--force` test, so consider flattening it before the soak.
+> FOLLOW-UP for Phase 4: Alpaca takes crypto fees in the BASE asset, so the
+> wallet qty (0.064453927) is < the recorded filled qty (0.064615466).
+> Reconcile DB qty against the actual wallet / record fees for exit + P&L.
 
 ### Schema additions
-- [ ] `positions` (id, symbol, side, qty, entry_price, entry_ts, status,
-      tp_price, **sl_price** (price-based), **support_break_price** (NEW),
-      confidence_at_entry, breakout_confirmed, risk_pct_used,
-      alpaca_order_id, ...)
-- [ ] `trade_history` (closed positions, realized P&L, **exit_reason**
-      including 'price_sl' vs 'support_break' vs 'tp', fees)
+- [x] `positions` — already FULLY declared in `01_schema_phase1.sql` (both
+      `sl_price` and `support_break_price`, `confidence_at_entry`,
+      `breakout_confirmed`, `risk_pct_used`, `alpaca_order_id`). Phase 3 writes
+      to it; no ALTER needed.
+- [x] `trade_history` — already declared in Phase 1 (incl. `exit_reason` CHECK
+      ∈ {price_sl, support_break, tp, manual}). Populated on close (Phase 4).
+- [x] `db/03_schema_phase3.sql` — seeds execution/TP knobs into `app_config`
+      (`tp.r_multiple`=2.0, `execution.time_in_force`=gtc, poll attempts/delay,
+      `execution.min_notional`=1.0). Applied to live `CryptoBotV2`.
 
 ### Modules to build
-- [ ] `core/sizing.py` — implement the locked formula:
-      `size = (equity × risk_pct(confidence)) / abs(entry − stop)`,
-      clamped by portfolio ceiling.
-      ALSO clamp to available cash: the formula can ask for more than you
-      can afford (tight stop + high confidence + large equity). Cap the
-      computed size at spendable cash, accounting for cash already tied up
-      in open positions.
-- [ ] `core/execution.py` — places buys via Alpaca, records ACTUAL fills
-- [ ] `core/orchestrator.py` — the HOURLY cycle (runs every hour on the
-      closed 1h bar):
-      market data → levels → TA (with breakout boost) →
-      for each symbol: if NOT already held AND signal AND confidence ≥ floor
-      → size → execute → write position with BOTH the price-based SL and
-      the support-break price.
-      Also each cycle: check every OPEN position for sell/exit conditions.
-      Skip symbols already held (no stacking). Honor cool-down after stop-out.
-- [ ] Hard gate in code: `place_entry(ta_signal=True, ...)` — refuses to run
-      without `ta_signal=True`
+- [x] `core/sizing.py` — locked formula
+      `qty = (equity × risk_pct(confidence)) / abs(entry − stop)`, clamped by
+      the portfolio aggregate-risk ceiling AND spendable cash; reads the active
+      `risk_profile` row. Records the EFFECTIVE post-clamp risk%. (Verified
+      offline: interpolation, cash clamp, portfolio clamp, all veto paths.)
+- [x] `core/execution.py` — `place_entry(client, *, ta_signal=True, ...)`
+      submits a market BUY and polls for the ACTUAL fill (partials handled);
+      `record_position` writes the open row with BOTH stop triggers + TP.
+- [x] `core/orchestrator.py` — the HOURLY cycle: market data → levels → TA
+      (with breakout boost) → for each symbol, if NOT held AND signal AND
+      confidence ≥ floor AND not in cool-down → size → execute → write position
+      with the price-based SL and the support-break price. Skips held symbols
+      (no stacking); tracks caps/cash across the cycle. EXIT pass is a marked
+      Phase 4 placeholder (Position Manager not built yet).
+- [x] Hard gate in code: `place_entry(ta_signal=True, ...)` raises
+      `PermissionError` unless `ta_signal is True` (invariant #1, structural).
+- [x] `scripts/run_trade_cycle.py` — manual cycle runner (`--dry-run`,
+      `--force SYMBOL` for the dev green-light entry).
+- [x] `scripts/apply_sql.py` — GO-splitting loader (applies `db/*.sql`).
 
-### Green-light test (Phase 3)
-- [ ] Trigger an entry on paper end-to-end (force a signal in dev mode if needed)
-- [ ] Position row appears with correct size, TP, price-SL, AND support-break price (NEW)
-- [ ] Confidence-at-entry recorded; a breakout entry shows the higher confidence (NEW)
-- [ ] Alpaca dashboard shows matching paper fill
-- [ ] Partial fills handled correctly (size in DB = actual filled)
+### Green-light test (Phase 3) — PASSED 2026-05-30
+- [x] Triggered an entry on paper end-to-end
+      (`python -m scripts.run_trade_cycle --force BTC/USD` — no natural signal, conf=25)
+- [x] Position row #1 with correct size (qty 0.06461547, risk 0.40% at conf 60),
+      TP 74,793.82 (2R), price-SL 72,936.68, AND support-break 72,413.79 (NEW)
+- [x] Confidence-at-entry recorded (60.00); breakout_confirmed=False (forced entry
+      was not a breakout — Phase 2 already verified a breakout adds +20 confidence)
+- [x] Alpaca order read back: status FILLED, qty + avg (73,616.50) match the DB row
+- [x] Partial-fill path in place (records actual filled_qty); this fill was full
 
 ---
 
