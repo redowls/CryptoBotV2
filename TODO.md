@@ -256,14 +256,71 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
 
 ---
 
-## Phase 5 — Watchlist Filters
+## Phase 5 — Watchlist Filters — CODE COMPLETE, offline logic green-light PASSED 2026-05-30
 
-- [ ] Implement liquidity filter (24h volume threshold)
-- [ ] Implement spread filter (bid-ask spread % cap)
-- [ ] Implement volatility filter (ATR band — too dead or too wild = skip)
-- [ ] Admin script to review filter results before activating new symbols
-- [ ] Wallet check: if a held symbol is removed from watchlist while
-      losing → trigger SL instead of silent deactivation
+> The tradeable-universe gate. Three independent entry filters
+> (`core/watchlist_filters.py`), each toggleable + tunable in SQL via the
+> `filters.*` keys, run in the orchestrator's ENTRY pass AFTER the cooldown
+> check and BEFORE sizing. They gate ENTRIES ONLY — open positions are always
+> managed for exits regardless of filters (a symbol going illiquid must never
+> strand a position). `--force` (DEV) bypasses the filters. Defaults are the
+> CONSERVATIVE profile the user chose.
+
+### Design choices — DECIDED (knobs seeded in `app_config` as `filters.*`)
+- [x] **Liquidity:** 24h quote volume = Σ(close·volume) over the last
+      `filters.vol_24h_bars`(=24) closed 1h bars ≥ `filters.min_24h_quote_volume`
+      (=$10,000,000). Alpaca reports BASE volume; ×close → quote (USD).
+- [x] **Spread:** live (ask−bid)/mid as a % ≤ `filters.max_spread_pct`(=0.20%).
+      Uses a LIVE quote (`market_data.latest_quote`), fetched only when the
+      spread filter is enabled; a quote-fetch failure is a conservative FAIL.
+- [x] **Volatility:** ATR%(=ATR/close·100) must sit INSIDE
+      [`filters.min_atr_pct`(=0.5), `filters.max_atr_pct`(=8.0)] — too dead
+      (fees dominate) OR too wild (stops get run) both skip. Reuses `ta.atr_period`.
+- [x] **Wallet-vs-watchlist drift:** if a held symbol is deactivated/removed
+      from the watchlist AND is underwater, FORCE-EXIT it (exit_reason='manual')
+      rather than leaving it unmanaged; an in-profit deactivated position is left
+      to the Position Manager's normal exit. Toggle `filters.drift_force_exit_enabled`.
+
+### Schema additions
+- [x] `db/05_schema_phase5.sql` — seeds the `filters.*` knobs into `app_config`
+      (2-col key/value MERGE, same style as Phases 1–4). NO new tables: filters
+      read cached bars + a live quote; drift reuses positions/trade_history.
+      Applied to live `CryptoBotV2`.
+
+### Modules to build
+- [x] `core/market_data.py` — added `Quote` + `latest_quote(client, symbol)`
+      (live top-of-book bid/ask, with the same transient-error retry as bars).
+- [x] `core/watchlist_filters.py` — `FilterParams.from_config()`; pure helpers
+      `quote_volume_24h` / `spread_pct` / `atr_pct` and `check_liquidity` /
+      `check_spread` / `check_volatility`; `evaluate_filters(...) -> FilterResult`
+      (a disabled filter can never fail — pinned by the offline test);
+      `screen_symbol(data_client, symbol, bars, params)` (fetches the quote only
+      when spread is enabled); `enforce_watchlist_drift(*, dry_run, now)`.
+- [x] Wired into `core/orchestrator.run_cycle`: filter gate in the entry loop
+      (after cooldown, before sizing; `--force` bypasses) + a DRIFT pass in the
+      EXIT phase (after the Position Manager, so freed capital is visible to entries).
+- [x] `scripts/run_watchlist_filters.py` — admin review tool (read-only; default
+      ALL watchlist rows incl. inactive, `--active`, or explicit symbols).
+- [x] `scripts/verify_phase5.py` — OFFLINE logic green-light (no DB/broker).
+
+### Green-light test (Phase 5)
+- [x] Offline logic green-light: `scripts/verify_phase5` 24/24 PASS — value
+      math, every filter boundary (incl. too-dead vs too-wild), combined verdict,
+      and "a disabled filter cannot fail".
+- [x] Live data + DB: schema applied, `filters.*` seeded; admin tool ran on live
+      BTC/USD (24h quote vol ~$23.3B, spread ~0.013%, ATR ~0.30%); dry-run cycle
+      completed clean with the filter gate + drift pass wired in.
+- [ ] **LIVE (carry-over):** exercise an actual filter REJECTION blocking an
+      entry in a real cycle (needs an UNHELD watchlist symbol with a BUY signal
+      that fails a filter — BTC is held + has no signal, so the cycle never
+      reaches its filter), and an actual drift FORCE-EXIT (deactivate a held,
+      underwater symbol). Same shape as the Phase 4 live-liquidation carry-over.
+
+> NOTE for the user: under the CONSERVATIVE defaults, BTC currently FAILS the
+> volatility filter — its hourly ATR is ~0.30%, below the 0.50% floor (a "too
+> dead" market right now). If BTC weren't held + had a signal, it would be
+> skipped. Lower `filters.min_atr_pct` (e.g. 0.25) if you want to trade BTC's
+> current low-volatility regime, or leave it (conservative = sit out dead tape).
 
 ---
 

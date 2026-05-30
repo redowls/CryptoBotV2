@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, CryptoLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # Alpaca data endpoint hiccups (maintenance windows, network blips) surface as
@@ -178,3 +178,53 @@ def upsert_bars(
             },
         )
     return len(bars)
+
+
+@dataclass(frozen=True)
+class Quote:
+    """Latest top-of-book bid/ask for a symbol (prices in quote currency)."""
+    symbol: str
+    bid: float
+    ask: float
+    ts: Optional[datetime]
+
+
+def _get_quote_with_retry(
+    client: CryptoHistoricalDataClient,
+    request: CryptoLatestQuoteRequest,
+    max_attempts: int = 3,
+    base_delay: float = 2.0,
+):
+    """Call Alpaca for a latest quote, retrying transient connection/timeouts."""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.get_crypto_latest_quote(request)
+        except _RETRYABLE_HTTP as exc:
+            last_exc = exc
+            if attempt < max_attempts:
+                time.sleep(base_delay * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
+def latest_quote(
+    client: CryptoHistoricalDataClient, symbol: str
+) -> Optional[Quote]:
+    """Latest bid/ask for `symbol`, or None if Alpaca returns no quote.
+
+    Used by the Phase 5 spread filter. Unlike bars this is intentionally the
+    LIVE top of book — a spread is a property of the order book right now, not
+    of a closed historical bar. Retries transient connection/timeout errors.
+    """
+    request = CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
+    data = _get_quote_with_retry(client, request)
+    q = data.get(symbol)
+    if q is None:
+        return None
+    bid = float(q.bid_price) if q.bid_price is not None else 0.0
+    ask = float(q.ask_price) if q.ask_price is not None else 0.0
+    ts = getattr(q, "timestamp", None)
+    if ts is not None and getattr(ts, "tzinfo", None) is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return Quote(symbol=symbol, bid=bid, ask=ask, ts=ts)

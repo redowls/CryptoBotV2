@@ -49,6 +49,11 @@ from core.market_data import (
 )
 from core.sizing import compute_size, load_active_risk_profile
 from core.ta_engine import TAParams, TASignal, evaluate
+from core.watchlist_filters import (
+    FilterParams,
+    enforce_watchlist_drift,
+    screen_symbol,
+)
 
 PROVIDER = "alpaca"
 
@@ -187,6 +192,7 @@ def run_cycle(
     min_notional = config.get_float("execution.min_notional", 1.0)
     cooldown_bars = config.get_int("cooldown.bars_after_stop", 3)
     params = TAParams.from_config()
+    filter_params = FilterParams.from_config()
     bar_seconds = timeframe_duration(timeframe).total_seconds()
 
     api_key, api_secret = get_active_credentials(PROVIDER, environment)
@@ -207,6 +213,27 @@ def run_cycle(
                 print(f"{ex.symbol:<10} {verb} pos#{ex.position_id} ({ex.reason}) {px}")
     except Exception as exc:  # pragma: no cover - defensive
         print(f"EXIT pass error: {type(exc).__name__}: {exc}")
+
+    # --- DRIFT safety (Phase 5): a held symbol removed from the watchlist while
+    # underwater is force-exited here rather than left to drift unmanaged
+    # (SUMMARY §10). Runs in the EXIT phase so any freed capital is visible to
+    # the entry-side accounting read below.
+    try:
+        for d in enforce_watchlist_drift(dry_run=dry_run):
+            if d.action == "force_exit":
+                verb = "WOULD FORCE-EXIT" if dry_run else "FORCE-EXITED"
+                px = f"@{d.exit_price:,.2f}" if d.exit_price else ""
+                print(
+                    f"{d.symbol:<10} {verb} pos#{d.position_id} "
+                    f"(watchlist drift, underwater) {px}"
+                )
+            else:
+                print(
+                    f"{d.symbol:<10} DRIFT  pos#{d.position_id} deactivated but "
+                    f"not underwater - left to PM"
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"DRIFT pass error: {type(exc).__name__}: {exc}")
 
     account = trading_client.get_account()
     equity = float(account.equity)
@@ -269,6 +296,17 @@ def run_cycle(
             if cooling:
                 print(f"{symbol:<10} COOL   - in cool-down after a recent stop-out")
                 continue
+
+            # Phase 5 watchlist filters: liquidity / spread / volatility gate.
+            # --force (DEV) bypasses them so an entry can always be exercised.
+            if not force:
+                screen = screen_symbol(data_client, symbol, bars, filter_params)
+                if not screen.passed:
+                    detail = "; ".join(
+                        c.detail for c in screen.checks if not c.passed
+                    )
+                    print(f"{symbol:<10} FILTER - {screen.summary()} ({detail})")
+                    continue
 
             size = compute_size(
                 confidence=sig.confidence,
