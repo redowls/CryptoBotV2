@@ -40,6 +40,7 @@ from core import config
 from core.db import connect_with_retry, get_active_credentials
 from core.execution import make_trading_client, place_entry, record_position
 from core.levels import detect_levels, persist_levels
+from core.position_manager import manage_open_positions
 from core.market_data import (
     fetch_closed_bars,
     make_client,
@@ -166,7 +167,13 @@ def run_cycle(
 ) -> int:
     """Run one hourly trade cycle. Returns 0 on success, 1 if any symbol errored.
 
-    dry_run: size and report intended entries but place NO orders.
+    The cycle runs BOTH halves (SUMMARY §12): first the EXIT pass — the Phase 4
+    Position Manager checks every open position for stop/support/TP exits and
+    trails its levels — then the ENTRY pass below. Exits run first so capital
+    freed this bar is visible to the entry-side accounting (held set, open
+    count, aggregate risk, cash all re-read after).
+
+    dry_run: size and report intended entries/exits but place NO orders.
     force:   DEV ONLY — synthesize a BUY signal for the given symbols so an
              entry can be exercised end-to-end (the Phase 3 green-light test).
     """
@@ -186,6 +193,20 @@ def run_cycle(
     data_client = make_client(api_key, api_secret)
     trading_client = make_trading_client(api_key, api_secret, paper=(environment != "live"))
     api_key = api_secret = ""  # drop plaintext once the clients hold it
+
+    # --- EXIT pass (Phase 4): manage open positions before any new entries ---
+    # A failure managing one symbol must not abort the whole cycle, so it logs
+    # and we continue into the entry pass. The entry-side capital state is read
+    # AFTER this, so it reflects any positions closed here.
+    try:
+        exits = manage_open_positions(symbols=symbols, dry_run=dry_run)
+        if exits:
+            verb = "WOULD EXIT" if dry_run else "EXITED"
+            for ex in exits:
+                px = f"@{ex.exit_price:,.2f}" if ex.exit_price else ""
+                print(f"{ex.symbol:<10} {verb} pos#{ex.position_id} ({ex.reason}) {px}")
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"EXIT pass error: {type(exc).__name__}: {exc}")
 
     account = trading_client.get_account()
     equity = float(account.equity)
@@ -323,11 +344,8 @@ def run_cycle(
             failures += 1
             print(f"{symbol:<10} ERROR  {type(exc).__name__}: {exc}")
 
-    # --- EXIT pass: Phase 4 Position Manager (not built yet) --------------
-    print(
-        "\nExit checks: deferred to Phase 4 (core/position_manager.py). "
-        f"{open_count} open position(s) carry static TP/SL + support-break triggers."
-    )
+    # The EXIT pass (Phase 4 Position Manager) ran at the TOP of the cycle so
+    # freed capital was visible to the entries above.
 
     print()
     if failures:

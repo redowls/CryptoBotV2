@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import text
@@ -170,3 +171,81 @@ def record_position(
         },
     ).scalar()
     return int(row)
+
+
+def close_position(
+    client,
+    symbol: str,
+    *,
+    poll_attempts: int = 5,
+    poll_delay: float = 1.0,
+) -> Fill:
+    """Liquidate the entire wallet position for `symbol`; return the ACTUAL fill.
+
+    Used by the Phase 4 Position Manager on a stop/exit. Closing the whole
+    wallet position (rather than the DB-recorded qty) naturally absorbs the
+    base-asset crypto-fee discrepancy (Phase 3 carry-over): the broker sells
+    exactly what is held, and we record the ACTUAL exit fill (invariant #7),
+    so P&L is computed from real filled qty x avg price.
+
+    Like :func:`place_entry`, broker I/O is kept OUT of any DB transaction.
+    """
+    order = client.close_position(symbol)
+    filled_qty, avg_price, status = _await_fill(
+        client, order, poll_attempts, poll_delay
+    )
+    return Fill(
+        order_id=str(order.id),
+        symbol=symbol,
+        requested_qty=0.0,
+        filled_qty=filled_qty,
+        avg_price=avg_price,
+        status=status,
+    )
+
+
+def record_exit(
+    conn: Connection,
+    *,
+    position_id: int,
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    opened_at_utc,
+    exit_reason: str,
+    fees: Optional[float] = None,
+) -> None:
+    """Close a position: append `trade_history` and flip the `positions` row.
+
+    `qty` and `exit_price` are the ACTUAL exit fill (invariant #7), so
+    `realized_pnl` reflects the real liquidation. `exit_reason` must be one of
+    price_sl / support_break / tp / manual (enforced by the Phase 1 CHECK).
+    """
+    realized_pnl = (exit_price - entry_price) * qty
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    conn.execute(
+        text(
+            "INSERT INTO dbo.trade_history "
+            "  (position_id, symbol, side, qty, entry_price, exit_price, "
+            "   realized_pnl, fees, exit_reason, opened_at_utc, closed_at_utc) "
+            "VALUES (:pid, :symbol, 'buy', :qty, :entry, :exit, "
+            "        :pnl, :fees, :reason, :opened, :closed)"
+        ),
+        {
+            "pid": position_id,
+            "symbol": symbol,
+            "qty": qty,
+            "entry": entry_price,
+            "exit": exit_price,
+            "pnl": realized_pnl,
+            "fees": fees,
+            "reason": exit_reason,
+            "opened": opened_at_utc,
+            "closed": now,
+        },
+    )
+    conn.execute(
+        text("UPDATE dbo.positions SET status = 'closed' WHERE id = :pid"),
+        {"pid": position_id},
+    )

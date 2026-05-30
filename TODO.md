@@ -178,32 +178,81 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
 
 ---
 
-## Phase 4 — Dynamic TP/SL + Trailing + Support-break exit
+## Phase 4 — Dynamic TP/SL + Trailing + Support-break exit — CODE COMPLETE, offline logic green-light PASSED 2026-05-30
 
-### Design choices
-- [ ] When can TP expand? (e.g. price moved X% in favor AND momentum still aligned)
-- [ ] How does SL trail? (e.g. SL = max(old_SL, new_TP − R × ATR))
-- [ ] SL must only ever move IN FAVOR of locked-in profit, never backward.
+> Offline decision logic verified by `scripts/verify_phase4.py` (16/16:
+> first-to-fire, wick-vs-close, monotonic SL/TP/support trails). The manager
+> also ran against LIVE data + DB in dry-run: pos#1 (BTC entry 73,616) is
+> marginally UNDERWATER at the current close (~73,556), so the manager
+> correctly makes NO change — `trail_only_in_profit` freezes the SL and no
+> trigger fires. That exercises the in-profit guard on live data, but the ONE
+> remaining green-light item is a real exit: a paper liquidation that writes a
+> `trade_history` row. It needs a bar that genuinely trips a trigger or a
+> manual flatten of pos#1 (see the question at the end of this phase).
+
+### Design choices — DECIDED (knobs seeded in `app_config` as `pm.*`)
+- [x] **When can TP expand?** While trend AND momentum still hold
+      (`pm.tp_expand_requires_alignment`=true, reusing the TA engine's
+      trend_aligned + momentum_ok components). new_tp = max(old_tp,
+      close + `pm.tp_r_multiple`(=2.0) × (close − new_sl)). Never shrinks.
+- [x] **How does SL trail?** new_sl = max(old_sl, close − `pm.trail_atr_mult`
+      (=1.5) × ATR), only while in profit (`pm.trail_only_in_profit`=true).
+- [x] SL only ever moves IN FAVOR (monotonic up); enforced by the `max(...)`.
+- [x] **Support trailing:** `pm.support_trail_enabled`=true — the support
+      trigger trails up toward price using the latest PERSISTED level (never
+      set at/above close, which would self-trigger).
+- [x] **Exit semantics:** price_sl fires on an intrabar LOW pierce (hard stop);
+      support_break fires only on a CONFIRMED CLOSE below support (wick ≠ break);
+      tp fires on an intrabar HIGH reach. Forward trails/expansions apply from
+      the NEXT bar — the exit check uses levels recorded on a PRIOR cycle, so
+      step 1 is free of look-ahead.
+
+### Schema additions
+- [x] `db/04_schema_phase4.sql` — `position_adjustments` audit table (one row
+      per sl_trail / tp_expand / support_trail) + seeds the `pm.*` knobs into
+      `app_config` (2-col key/value MERGE, same style as Phases 1–3). Applied
+      to live `CryptoBotV2`. `positions`/`trade_history` were already fully
+      declared (Phase 1); the manager only WRITES them.
 
 ### Modules to build
-- [ ] `core/position_manager.py` — periodic loop, for each open position:
-  - [ ] Read current persisted `sr_levels` (do NOT recompute ad hoc) (NEW)
-  - [ ] **Support-break exit:** if a confirmed closed bar is below the
-        position's support level → close the position, exit_reason =
-        'support_break' (NEW)
-  - [ ] Price-based SL exit: if price hits sl_price → close, exit_reason = 'price_sl'
-  - [ ] **Whichever of the two triggers first wins** (NEW)
-  - [ ] TP expansion + SL trailing when price runs in favor
-- [ ] Persist every TP/SL change to an audit table for debugging
+- [x] `core/position_manager.py` — `manage_open_positions(symbols, dry_run, now)`
+      loops every open position on its latest closed bar:
+  - [x] Reads the latest persisted `sr_levels` via `levels.latest_levels`
+        (do NOT recompute ad hoc — invariant #6)
+  - [x] **Support-break exit:** confirmed close below support → close,
+        exit_reason = 'support_break'
+  - [x] Price-based SL exit: bar low pierces sl_price → close, 'price_sl'
+  - [x] **Whichever of the two triggers first wins** (`resolve_exit`: higher
+        trigger reached first as price falls; protective stops beat tp)
+  - [x] TP expansion + SL trailing + support trailing when price runs in favor
+  - [x] Pure decision helpers (`resolve_exit`/`trail_sl`/`trail_support`/
+        `expand_tp`) split out for deterministic offline testing
+- [x] `core/execution.py` — `close_position` (liquidate whole wallet position;
+      absorbs the base-asset fee discrepancy) + `record_exit` (writes
+      `trade_history` with realized P&L + exit_reason, flips position to closed)
+- [x] Wired the EXIT pass into `core/orchestrator.run_cycle` (runs BEFORE the
+      entry pass so freed capital is visible to entries)
+- [x] Persist every TP/SL change to `position_adjustments` (audit)
+- [x] `scripts/run_position_manager.py` (`--dry-run`) + `scripts/verify_phase4.py`
 
 ### Green-light test (Phase 4)
-- [ ] Simulated favorable move: TP expands, SL trails up, lock-in visible
-- [ ] Simulated price-SL hit: closes at correct price, exit_reason = 'price_sl'
-- [ ] **Simulated support break (confirmed close below support): closes,
-      exit_reason = 'support_break', even if price-SL not yet hit** (NEW)
-- [ ] **Confirm a single wick below support does NOT trigger — only a
-      confirmed close** (NEW)
-- [ ] trade_history populated correctly with the right exit reason
+- [x] Simulated favorable move: TP expands, SL trails up, lock-in visible
+      (offline `verify_phase4`)
+- [x] Simulated price-SL hit: 'price_sl' verdict at the correct price (offline)
+- [x] **Simulated support break (confirmed close below support): 'support_break'
+      even if price-SL not yet hit** (offline)
+- [x] **Confirm a single wick below support does NOT trigger — only a
+      confirmed close** (offline)
+- [x] Live data + DB dry-run runs clean; in-profit guard correctly holds an
+      underwater position unchanged
+- [ ] **LIVE:** an actual paper liquidation writes `trade_history` with the
+      right exit_reason (needs a real trigger or a manual flatten of pos#1).
+      Attempted 2026-05-30 via `scripts/flatten_position 1` — BLOCKED by the
+      recurring dev-box TLS interception (`Hostname mismatch` on
+      paper-api.alpaca.markets, see CLAUDE.md "Live setup facts"). Code path
+      verified up to the broker call; the failed order wrote NOTHING (pos#1
+      still open, trade_history empty — broker I/O is outside the DB tx).
+      Retry from the VPS, or once the interception clears.
 
 ---
 
