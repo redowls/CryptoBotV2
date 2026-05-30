@@ -1,0 +1,19 @@
+Phase 5: watchlist filters (liquidity / spread / volatility) + drift safety
+
+Entry-eligibility gate (entries only; exits are never filtered):
+- liquidity: 24h quote volume (sum close*volume over last N bars) >= floor
+- spread: live bid/ask spread % <= cap (new market_data.latest_quote)
+- volatility: ATR% inside a band (too dead OR too wild = skip)
+All filters toggleable + tunable via filters.* in app_config.
+
+Wallet-vs-watchlist drift: a held symbol deactivated while underwater is
+force-exited (exit_reason=manual); in-profit ones left to the Position Manager.
+
+Wired into orchestrator.run_cycle: filter gate in the entry loop (after
+cooldown, before sizing; --force bypasses) + a drift pass in the exit phase.
+
+Adds core/watchlist_filters.py, scripts/run_watchlist_filters.py (admin
+review), scripts/verify_phase5.py (offline green-light 24/24), and
+db/05_schema_phase5.sql (filters.* seeds, applied to live DB).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
