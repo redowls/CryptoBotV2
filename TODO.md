@@ -324,24 +324,78 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
 
 ---
 
-## Phase 6 — AI Research Layer (default OFF)
+## Phase 6 — AI Research Layer (default OFF) — CODE COMPLETE, offline logic green-light PASSED 2026-05-30
+
+> Advisory-only AI confidence multiplier ∈ [0,1] — it can VETO/DAMPEN but never
+> raise confidence or create an entry (invariant #2). The user chose to BUILD
+> OFFLINE-ONLY this session: the Anthropic key is NOT wired, so the live cycle
+> runs NEUTRAL (x1.00 = pure TA) until a key is provided. News source = the
+> Alpaca news API (no new creds/dep). Default model = `claude-opus-4-8`
+> (user's choice; tune `ai.model` in SQL to downgrade for cost).
+> The `anthropic` SDK is imported LAZILY everywhere, so the bot + the offline
+> green-light run without it installed (confirmed: anthropic not installed,
+> 21/21 PASS).
+
+### Design choices — DECIDED (knobs seeded in `app_config` as `ai.*`)
+- [x] **Master switch** is the existing `ai_enabled` (Phase 1 seed, false).
+      When false (or no key) the advisor returns a NEUTRAL 1.0 → the entry path
+      is byte-for-byte the pre-Phase-6 behaviour.
+- [x] **Multiplier semantics:** sentiment × context, each ∈ [0,1], combined by
+      PRODUCT (each can only subtract more), bounded below by `ai.min_multiplier`
+      (=0.0 → full veto allowed). `adjusted = ta_conf × multiplier` ≤ ta_conf
+      ALWAYS; the TA `signal` bool is passed through UNCHANGED.
+- [x] **Fail-open:** any error (no key, news fetch fail, API error, bad JSON)
+      → NEUTRAL 1.0. AI failure must never alter the TA pipeline.
+- [x] **Cost placement:** the advisor runs in the entry loop only AFTER the TA
+      signal is True AND the Phase 5 filters pass (no API spend on non-setups);
+      `--force` (DEV) bypasses it. Watchlist suggestions are ADMIN-run only
+      (`scripts/run_ai_review --watchlist`), not part of the hourly cycle.
 
 ### Hard rules (re-stated)
-- [ ] AI can NEVER raise confidence past the TA gate
-- [ ] AI can only veto / dampen
-- [ ] `ai_enabled` config flag controls everything; default false
+- [x] AI can NEVER raise confidence past the TA gate (multiplier clamped ≤ 1)
+- [x] AI can only veto / dampen (multiplier ∈ [0,1], applied to confidence only)
+- [x] `ai_enabled` config flag controls everything; default false
 
-### Modules
-- [ ] `core/ai_sentiment.py` — pull news for symbol, ask Claude for sentiment
-- [ ] `core/ai_context.py` — price-context reasoning
-- [ ] `core/ai_watchlist.py` — suggest add/remove (suggestions land in a
-      review table, NOT auto-applied)
-- [ ] Wire AI suggestion into entry path as a confidence MULTIPLIER ∈ [0, 1]
+### Schema additions
+- [x] `db/06_schema_phase6.sql` — seeds the `ai.*` knobs + creates
+      `ai_suggestions` (advisory audit log of every multiplier) and
+      `ai_watchlist_suggestions` (add/remove proposals, status pending, NEVER
+      auto-applied). Re-runnable (guarded CREATEs + MERGE seed).
+      **NOT YET APPLIED to the live DB** — apply with
+      `scripts.apply_sql db/06_schema_phase6.sql` (carry-over below).
+
+### Modules to build
+- [x] `core/ai_client.py` — `AIParams.from_config()`; the PURE multiplier core
+      (`clamp01`, `combine_multipliers`, `apply_ai_multiplier`, `parse_multiplier`)
+      that the offline test pins; lazy Anthropic client + `anthropic_key()`
+      resolver (env `ANTHROPIC_API_KEY` → encrypted `api_credentials`).
+- [x] `core/ai_sentiment.py` — pull news for the symbol (Alpaca news API), ask
+      Claude for a long-entry sentiment multiplier; fail-open to neutral.
+- [x] `core/ai_context.py` — price-context reasoning over the TA snapshot →
+      trap-catching multiplier; no extra market-data calls.
+- [x] `core/ai_watchlist.py` — suggest add/remove → review table only, NEVER
+      touches `dbo.watchlist`.
+- [x] `core/ai_advisor.py` — combines sentiment+context → one multiplier, logs
+      to `ai_suggestions`; the single entry point the orchestrator calls.
+- [x] Wired into `core/orchestrator.run_cycle` entry path as a confidence
+      MULTIPLIER ∈ [0,1] (after filters, before sizing; AIVETO line when the
+      dampened confidence drops below the trade floor).
+- [x] `scripts/verify_phase6.py` (OFFLINE logic gate) +
+      `scripts/run_ai_review.py` (admin preview; dry-run by default, `--write`,
+      `--watchlist`).
 
 ### Green-light test (Phase 6)
-- [ ] Toggle `ai_enabled = true` in config
-- [ ] AI runs, suggestions logged, no autonomous changes to watchlist
-- [ ] Confirmed: no entry can occur without TA signal, regardless of AI score
+- [x] OFFLINE logic green-light: `scripts/verify_phase6` 21/21 PASS — clamp,
+      product-combine + floor, parser fail-open, and invariant #2 structurally
+      (adjusted ≤ TA conf for ALL multipliers incl. >1; signal=False never
+      flipped True; multiplier>1 cannot raise).
+- [ ] **LIVE (carry-over):** apply `db/06_schema_phase6.sql`; wire an Anthropic
+      key (env or encrypted `api_credentials` provider='anthropic'); toggle
+      `ai_enabled = true`; run `scripts.run_ai_review` and a `--dry-run` cycle
+      and confirm: AI runs, advisory rows land in `ai_suggestions`, an AI
+      dampening/veto is visibly applied, watchlist suggestions land in the
+      review table with NO autonomous changes to `dbo.watchlist`, and no entry
+      can occur without a TA signal regardless of AI score.
 
 ---
 

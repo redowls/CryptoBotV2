@@ -6,3 +6,7 @@ cryptography>=43.0.0     # Fernet symmetric encryption for stored API keys
 SQLAlchemy>=2.0.30       # DB engine / Core query layer
 pyodbc>=5.1.0            # ODBC Driver 18 bridge to SQL Server
 python-dotenv>=1.0.1     # load .env into the environment
+
+# Phase 6 — AI research layer (default OFF). Imported lazily, so the rest of the
+# bot and the offline green-light run without it installed.
+anthropic>=0.40.0        # Claude API client for the advisory AI layer

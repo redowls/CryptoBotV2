@@ -36,7 +36,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from core import config
+from core import ai_advisor, config
 from core.db import connect_with_retry, get_active_credentials
 from core.execution import make_trading_client, place_entry, record_position
 from core.levels import detect_levels, persist_levels
@@ -308,8 +308,39 @@ def run_cycle(
                     print(f"{symbol:<10} FILTER - {screen.summary()} ({detail})")
                     continue
 
+            # Phase 6 AI research layer (advisory; default OFF). It can only
+            # SUBTRACT: a multiplier in [0,1] dampens the TA confidence, never
+            # raises it and never flips the signal (invariant #2). When
+            # ai_enabled=false (or no key) the advice is NEUTRAL, so the line
+            # below is byte-for-byte the pre-Phase-6 behaviour. --force bypasses
+            # the AI too, so a DEV entry can always be exercised.
+            entry_confidence = sig.confidence
+            if not force:
+                advice = ai_advisor.advise(
+                    symbol,
+                    ta_confidence=sig.confidence,
+                    signal=sig.signal,
+                    snapshot=sig.snapshot,
+                    closes=[b.close for b in bars],
+                    bar_ts=sig.bar_ts,
+                    floor=profile.min_confidence_to_trade,
+                    dry_run=dry_run,
+                )
+                if advice.enabled and advice.dampened:
+                    entry_confidence = advice.adjusted_confidence
+                    print(
+                        f"{symbol:<10} AI     - x{advice.multiplier:.2f} conf "
+                        f"{sig.confidence:.0f}->{entry_confidence:.0f} ({advice.summary()})"
+                    )
+                    if entry_confidence < profile.min_confidence_to_trade:
+                        print(
+                            f"{symbol:<10} AIVETO - AI dampened below floor "
+                            f"({entry_confidence:.0f} < {profile.min_confidence_to_trade:.0f})"
+                        )
+                        continue
+
             size = compute_size(
-                confidence=sig.confidence,
+                confidence=entry_confidence,
                 equity=equity,
                 cash_available=cash,
                 entry_price=sig.entry_hint,
@@ -331,7 +362,7 @@ def run_cycle(
                     f"(notional {size.notional:,.2f}, risk {size.risk_pct_used:.2f}%) "
                     f"SL={sig.stop_hint:,.2f} TP={tp_price:,.2f} "
                     f"support={sig.support_level if sig.support_level else '-'} "
-                    f"conf={sig.confidence:.0f} brk={'Y' if sig.breakout_confirmed else 'N'}"
+                    f"conf={entry_confidence:.0f} brk={'Y' if sig.breakout_confirmed else 'N'}"
                 )
                 continue
 
@@ -358,7 +389,7 @@ def run_cycle(
                         sl_price=sig.stop_hint,
                         support_break_price=sig.support_level,
                         tp_price=tp_price,
-                        confidence=sig.confidence,
+                        confidence=entry_confidence,
                         breakout_confirmed=sig.breakout_confirmed,
                         risk_pct_used=size.risk_pct_used,
                     )
@@ -375,7 +406,7 @@ def run_cycle(
                 f"{symbol:<10} BOUGHT pos#{pos_id} qty={fill.filled_qty:.8f}{partial} "
                 f"@{fill.avg_price:,.2f} SL={sig.stop_hint:,.2f} TP={tp_price:,.2f} "
                 f"support={sig.support_level if sig.support_level else '-'} "
-                f"conf={sig.confidence:.0f} risk={size.risk_pct_used:.2f}% "
+                f"conf={entry_confidence:.0f} risk={size.risk_pct_used:.2f}% "
                 f"order={fill.order_id}"
             )
         except Exception as exc:
