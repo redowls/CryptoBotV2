@@ -10,46 +10,87 @@
 ### Setup on the VPS
 - [ ] Create a dedicated non-root Linux user for the bot (e.g. `tradebot`).
       Bot process must NOT run as root.
-- [ ] Install Microsoft ODBC Driver 18:
-  - [ ] Add Microsoft apt repo
-  - [ ] `sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev`
-- [ ] Clone/copy the `tradebot/` project to the VPS as the bot user.
-- [ ] Create a Python venv: `python3 -m venv .venv && source .venv/bin/activate`
-- [ ] `pip install -r requirements.txt`
+      **DEFERRED 2026-05-31:** installed as `root` at `/root/CryptoBotV2` per user
+      decision (the old Donchian bot under `trader` was left untouched). Migrate
+      to a dedicated `tradebot` user before the paper soak.
+- [x] Install Microsoft ODBC Driver 18:
+  - [x] Add Microsoft apt repo
+  - [x] `sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev`
+        (pre-installed; cleaned up a broken legacy `mssql-tools` v17 package
+        that was poisoning apt — `mssql-tools18` already covers sqlcmd.)
+- [x] Clone/copy the `tradebot/` project to the VPS as the bot user.
+      (Cloned to `/root/CryptoBotV2` 2026-05-31.)
+- [x] Create a Python venv: `python3 -m venv .venv && source .venv/bin/activate`
+      (Installed `python3.12-venv` first; venv lives at `/root/CryptoBotV2/.venv`.)
+- [x] `pip install -r requirements.txt`
 
 ### Master key
-- [ ] Generate the master key ONCE:
+- [x] Generate the master key ONCE:
       `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
-- [ ] Copy `.env.example` → `.env`, paste the key.
-- [ ] `chmod 600 .env && chown tradebot:tradebot .env`
+      (Reused the existing master key — it still decrypts the Alpaca creds in
+      the live DB. **Treat as compromised** — pasted in chat 2026-05-31; rotate
+      before the paper soak.)
+- [x] Copy `.env.example` → `.env`, paste the key.
+- [x] `chmod 600 .env && chown tradebot:tradebot .env`
+      (chmod done; chown deferred with the non-root-user task above — file is
+      currently `root:root 600`.)
 - [ ] **Back the master key up offline** (password manager / encrypted USB).
 
 ### Database
-- [ ] In SSMS: `CREATE DATABASE tradebot;`
-- [ ] Run `db/01_schema_phase1.sql` against the new database.
+- [x] In SSMS: `CREATE DATABASE tradebot;` (Already done previously — DB is
+      `CryptoBotV2` on `localhost:1433`, not `tradebot`.)
+- [x] Run `db/01_schema_phase1.sql` against the new database.
+      (Schema was already in place when this install started — Phase 1–5 + 7
+      tables verified present.)
 - [ ] Confirm the seeded `medium` risk profile is `is_active = 1`.
 - [ ] Decide on final risk %: keep 1.0 or `UPDATE risk_profile SET max_risk_per_trade_pct = ?`.
-- [ ] Add at least one watchlist row:
+- [x] Add at least one watchlist row:
       `INSERT INTO watchlist (symbol, base_asset, quote_asset) VALUES ('BTC/USD','BTC','USD');`
-- [ ] Decide: SQL Server same VPS or remote? Note connection in `.env`.
-- [ ] Confirm SQL auth (recommended) — Windows/Kerberos needs a different connection string.
+      (Loaded 9 active symbols 2026-05-31: BTC, ETH, SOL, AVAX, LINK,
+      DOGE, LTC, AAVE, UNI — all `/USD`, all `added_by='manual'`.)
+- [x] Decide: SQL Server same VPS or remote? Note connection in `.env`.
+      (Same VPS — `DB_SERVER=localhost`.)
+- [x] Confirm SQL auth (recommended) — Windows/Kerberos needs a different connection string.
+      (`DB_AUTH=sql`, user `sa` — switch to a least-privilege `tradebot_app`
+      login before the paper soak.)
 
 ### Alpaca
-- [ ] Create paper API key + secret in the Alpaca dashboard.
+- [x] Create paper API key + secret in the Alpaca dashboard. (Carried over —
+      paper creds for the `PKGT***` account were already in `api_credentials`
+      from a prior install; the existing master key decrypts them cleanly.)
 - [ ] Confirm the key is scoped trading-only (no withdrawal).
-- [ ] Load env: `set -a; source .env; set +a`
-- [ ] Run `python -m scripts.insert_credentials` and enter the paper key + secret.
+- [x] Load env: `set -a; source .env; set +a`
+- [x] Run `python -m scripts.insert_credentials` and enter the paper key + secret.
+      (Skipped — active `alpaca/paper` row already present in
+      `dbo.api_credentials` from a prior install. Re-run when rotating.)
 - [ ] Verify in SSMS:
       `SELECT id, provider, key_label, environment, is_active FROM api_credentials;`
 
 ### Green-light test
-- [ ] Run `python -m scripts.check_connectivity`
-- [ ] All four lines must PASS:
-  - [ ] DB reachable
-  - [ ] Decrypt Alpaca creds
-  - [ ] Alpaca paper account (returns equity/cash)
-  - [ ] Live crypto quote (returns bid/ask)
-- [ ] **PHASE 1 GREEN LIGHT achieved** → proceed to Phase 2
+- [x] Run `python -m scripts.check_connectivity`
+- [x] All four lines must PASS:
+  - [x] DB reachable
+  - [x] Decrypt Alpaca creds (key starts `PKGT...`)
+  - [x] Alpaca paper account (returns equity/cash — equity 9997.84, cash 5243.24)
+  - [x] Live crypto quote (BTC/USD bid 73,780.40 / ask 73,863.51)
+- [x] **PHASE 1 GREEN LIGHT achieved** → proceed to Phase 2 (re-confirmed on
+      the VPS 2026-05-31)
+
+### VPS deployment record — 2026-05-31
+- Host: `185.202.236.11` (Ubuntu 24.04 LTS, kernel 6.8)
+- Install path: `/root/CryptoBotV2` (run as `root` — see deferred non-root task)
+- Venv: `/root/CryptoBotV2/.venv` (Python 3.12.3)
+- `.env`: mode 600, `DB_SERVER=localhost`, `DB_NAME=CryptoBotV2`, `DB_AUTH=sql`,
+  `DB_USER=sa`, `DB_ENCRYPT=yes`, `DB_TRUST_SERVER_CERTIFICATE=yes`
+- Systemd units (created 2026-05-31, both `enable --now`):
+  - `cryptobotv2.service` — Phase 7 daemon (`scripts.run_daemon`, live not dry-run)
+  - `cryptobotv2-monitor.timer` → `cryptobotv2-monitor.service` (oneshot,
+    `scripts.monitor_heartbeat`, fires every 5 min after 2-min OnBootSec)
+- Coexists with the OLD `cryptobot.service` (Donchian bot at
+  `/home/trader/cryptobot`, different DB `cryptobot`, different Alpaca paper
+  key `PKKX***`) — fully isolated.
+- Logs: `journalctl -u cryptobotv2 -f` (structured JSON, daily-rotated to
+  `/root/CryptoBotV2/logs/` per `obs.log_dir`).
 
 ---
 
@@ -459,13 +500,22 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
       classification.
 - [x] Smoke: modules import with NO DB hit at import time; a logger emit writes a
       JSON line to stderr + the daily-rotated file.
-- [ ] **LIVE (carry-over — needs the user):** apply `db/07_schema_phase7.sql`;
-      store the Telegram bot creds (`scripts.insert_credentials`, provider='telegram');
-      run `scripts.run_daemon --dry-run` and confirm heartbeat rows land in
-      `dbo.heartbeat`; then force a stall (stop the daemon) and confirm
-      `scripts.monitor_heartbeat` sends a real Telegram alert. Critical-alert
-      paths (auth/DB/crash-with-open-positions) verified in logic; a real fire
-      needs the corresponding live fault.
+- [x] **Schema applied to live DB:** `dbo.heartbeat` table exists in
+      `CryptoBotV2` (verified 2026-05-31 — applied from a prior session, the
+      `cryptobotv2.service` daemon is now writing rows to it).
+- [x] **Daemon live on the VPS** (`cryptobotv2.service`, started 2026-05-31
+      07:46 UTC+7): heartbeat rows landing in `dbo.heartbeat` every 5 min
+      (`obs.heartbeat_interval_secs=300`, `id=3,4,...` observed). Running in
+      **production mode (not `--dry-run`)** against paper account `PKGT***`.
+- [x] **Heartbeat watchdog live** (`cryptobotv2-monitor.timer`, oneshot every
+      5 min) — replaces the cron pattern in the original design.
+- [ ] **LIVE (remaining carry-over):** store the Telegram bot creds
+      (`scripts.insert_credentials`, provider='telegram'); then force a stall
+      (stop the daemon) and confirm `scripts.monitor_heartbeat` sends a real
+      Telegram alert. Until Telegram creds are stored, `alert.channel` is
+      effectively log-only. Critical-alert paths (auth/DB/crash-with-open-
+      positions) verified in logic; a real fire needs the corresponding live
+      fault.
 
 ---
 
