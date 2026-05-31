@@ -416,9 +416,27 @@ def run_cycle(
     # The EXIT pass (Phase 4 Position Manager) ran at the TOP of the cycle so
     # freed capital was visible to the entries above.
 
+    # Phase 7 observability: record a per-cycle heartbeat (best-effort — a
+    # heartbeat failure must NEVER change the cycle's outcome). The daemon also
+    # writes its own liveness ticks between cycles.
+    _cycle_heartbeat(failures, equity)
+
     print()
     if failures:
         print(f"Cycle completed with {failures} error(s) - see above.")
         return 1
     print("Cycle complete.")
     return 0
+
+
+def _cycle_heartbeat(failures: int, equity: float) -> None:
+    """Write a 'cycle' heartbeat row; swallow any error (observability is best-effort)."""
+    try:
+        from core import heartbeat
+
+        status = heartbeat.OK if failures == 0 else heartbeat.DEGRADED
+        heartbeat.write_heartbeat(
+            component="cycle", status=status, equity=equity, detail=f"failures={failures}"
+        )
+    except Exception:  # pragma: no cover - never break the cycle over a heartbeat
+        pass

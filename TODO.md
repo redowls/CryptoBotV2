@@ -399,13 +399,73 @@ All in `app_config` — `UPDATE app_config SET config_value=... WHERE config_key
 
 ---
 
-## Phase 7 — Observability + Alerting
+## Phase 7 — Observability + Alerting — CODE COMPLETE, offline logic green-light PASSED 2026-05-31
 
-- [ ] Structured JSON logs (structlog), one file per day, rotated
-- [ ] Heartbeat row written every N minutes to a `heartbeat` table
-- [ ] External monitor (cron + curl, or healthchecks.io) alerts if heartbeat stalls
-- [ ] Alert channel: email or Telegram bot (your choice)
-- [ ] Critical alerts: bot crashed with open positions / Alpaca auth failed / DB unreachable
+> The bot's safety net: it must never silently die with open positions. A
+> long-running DAEMON fires the hourly cycle AND writes a liveness heartbeat
+> every N minutes; an INDEPENDENT external monitor alerts (Telegram) when the
+> heartbeat goes stale. All cadence/alert behaviour is config-driven (`obs.*` /
+> `alert.*`, tunable in SQL). Built on the stdlib — no new runtime dependency
+> (same minimal-dep ethos as the rest of the bot); the offline green-light needs
+> nothing installed.
+
+### Design choices — DECIDED (knobs seeded in `app_config` as `obs.*` / `alert.*`)
+- [x] **Run model:** a long-running daemon (`core/daemon.py`, stdlib computed-
+      next-fire loop). Fires the cycle at `obs.cycle_minute`(=1) past each hour
+      (offset so the just-closed 1h bar has settled — closed-bars-only) and
+      writes a `daemon`/`alive` heartbeat every `obs.heartbeat_interval_secs`(=300).
+- [x] **Logging:** structured JSON, one line per event, daily-rotated at UTC
+      midnight (`obs.log_dir`=logs, `obs.log_level`=INFO, `obs.log_retention_days`=14).
+      `core/obs.py` is DB-free and configures lazily on first emit, so logging
+      works even when the DB is unreachable (exactly when you need it).
+- [x] **Alert channel:** Telegram (user's choice). Bot token + chat id live
+      ENCRYPTED in `api_credentials` (provider='telegram'; token in
+      encrypted_api_key, chat id in encrypted_api_secret — invariant #8). Delivery
+      is a stdlib `urllib` HTTPS POST to the Bot API. `alert.channel`='none' = log only.
+- [x] **Severity + dedup:** alerts gated by `alert.min_severity`(=warning;
+      info<warning<critical) and de-duplicated within `alert.dedup_secs`(=3600)
+      via a small JSON file in the log dir (survives across separate cron monitor
+      runs). `send_alert` is FAIL-SAFE — it never raises into the caller.
+
+### Schema additions
+- [x] `db/07_schema_phase7.sql` — `heartbeat` table (component / status ∈
+      {alive,ok,degraded,error} / detail / open_positions / equity / host /
+      created_at_utc, indexed on created_at_utc DESC) + seeds the `obs.*` /
+      `alert.*` knobs (2-col key/value MERGE, same style as Phases 1–6).
+      Re-runnable. **NOT YET APPLIED to the live DB** (carry-over below).
+
+### Modules to build
+- [x] `core/obs.py` — structured JSON logging: pure `iso_utc` / `event_dict`
+      helpers + lazy, DB-free `configure()` / `get_logger(component)`.
+- [x] `core/heartbeat.py` — `write_heartbeat(...)`, `latest_heartbeat(...)`,
+      `open_position_count(conn)`, pure `seconds_since` / `is_stale`,
+      `HeartbeatParams.from_config()`.
+- [x] `core/alerting.py` — `send_alert(subject, body, severity, ...)` (Telegram,
+      fail-safe) + pure `severity_rank` / `should_send` / `dedup_key` /
+      `is_duplicate` / `format_telegram`; `AlertParams.from_config()`.
+- [x] `core/daemon.py` — `run_forever(...)` loop + pure `next_cycle_time` /
+      `looks_like_auth_error` / `looks_like_db_error`. Raises the critical
+      alerts (cycle crash — escalated when positions are open — / Alpaca auth /
+      DB unreachable).
+- [x] Wired a per-cycle heartbeat into `core/orchestrator.run_cycle` (best-effort).
+- [x] `scripts/run_daemon.py` (`--dry-run`) — the production run mode.
+- [x] `scripts/monitor_heartbeat.py` — the independent external watchdog (cron).
+- [x] `scripts/verify_phase7.py` — OFFLINE logic green-light (no DB/broker/network).
+
+### Green-light test (Phase 7)
+- [x] OFFLINE logic green-light: `scripts/verify_phase7` 32/32 PASS — log-record
+      shape, heartbeat staleness math (incl. naive-UTC + missing), alert severity
+      gate + dedup window + message format, daemon next-fire math + auth/DB fault
+      classification.
+- [x] Smoke: modules import with NO DB hit at import time; a logger emit writes a
+      JSON line to stderr + the daily-rotated file.
+- [ ] **LIVE (carry-over — needs the user):** apply `db/07_schema_phase7.sql`;
+      store the Telegram bot creds (`scripts.insert_credentials`, provider='telegram');
+      run `scripts.run_daemon --dry-run` and confirm heartbeat rows land in
+      `dbo.heartbeat`; then force a stall (stop the daemon) and confirm
+      `scripts.monitor_heartbeat` sends a real Telegram alert. Critical-alert
+      paths (auth/DB/crash-with-open-positions) verified in logic; a real fire
+      needs the corresponding live fault.
 
 ---
 
