@@ -117,6 +117,17 @@ def place_entry(
     filled_qty, avg_price, status = _await_fill(
         client, order, poll_attempts, poll_delay
     )
+    # If the poll window expired with the order still live on Alpaca, cancel
+    # it so the reserved cash is released. Without this, repeated NOFILLs stack
+    # market orders that all reserve buying power until Alpaca rejects with
+    # "insufficient balance". Best-effort: a failed cancel just degrades to the
+    # original behavior, and the next cycle would have re-submitted anyway.
+    _TERMINAL_STATUSES = {"filled", "canceled", "rejected", "expired"}
+    if status.lower() not in _TERMINAL_STATUSES:
+        try:
+            client.cancel_order_by_id(str(order.id))
+        except Exception:
+            pass
     return Fill(
         order_id=str(order.id),
         symbol=symbol,
@@ -190,7 +201,10 @@ def close_position(
 
     Like :func:`place_entry`, broker I/O is kept OUT of any DB transaction.
     """
-    order = client.close_position(symbol)
+    # Alpaca DELETE /v2/positions/<symbol> puts the symbol in the URL path,
+    # so the slash in crypto pairs (DOGE/USD) breaks routing -> 404. Strip it.
+    broker_symbol = symbol.replace("/", "")
+    order = client.close_position(broker_symbol)
     filled_qty, avg_price, status = _await_fill(
         client, order, poll_attempts, poll_delay
     )
