@@ -122,10 +122,29 @@ def place_entry(
     # market orders that all reserve buying power until Alpaca rejects with
     # "insufficient balance". Best-effort: a failed cancel just degrades to the
     # original behavior, and the next cycle would have re-submitted anyway.
+    #
+    # A market BUY is marketable and WILL fill, so the cancel races against a
+    # late fill. Cancelling without re-reading the order can leak an unmanaged
+    # ("orphan") position — a fill with no `positions` row managing its stops
+    # (invariants #5/#7). So after cancelling, re-read the order's FINAL state
+    # and report whatever ACTUALLY filled; the caller records the position iff
+    # something filled. Give the cancel/fill a moment to settle first.
     _TERMINAL_STATUSES = {"filled", "canceled", "rejected", "expired"}
     if status.lower() not in _TERMINAL_STATUSES:
         try:
             client.cancel_order_by_id(str(order.id))
+        except Exception:
+            pass
+        try:
+            time.sleep(poll_delay)
+            order = client.get_order_by_id(str(order.id))
+            filled_qty = float(order.filled_qty or 0)
+            avg_price = (
+                float(order.filled_avg_price)
+                if order.filled_avg_price is not None
+                else None
+            )
+            status = getattr(order.status, "value", str(order.status))
         except Exception:
             pass
     return Fill(

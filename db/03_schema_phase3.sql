@@ -36,8 +36,11 @@ USING (VALUES
 
     -- Order mechanics. Crypto market orders use GTC time-in-force on Alpaca.
     (N'execution.time_in_force',  N'gtc'),
-    (N'execution.poll_attempts',  N'5'),     -- times to poll the order for a fill
-    (N'execution.poll_delay_secs', N'1.0'),  -- delay between fill polls
+    -- Fill window = poll_attempts * poll_delay_secs (~30s). Paper crypto market
+    -- orders can sit at status=new for several seconds; a window that is too
+    -- short makes place_entry cancel a buy that was about to fill.
+    (N'execution.poll_attempts',  N'20'),    -- times to poll the order for a fill
+    (N'execution.poll_delay_secs', N'1.5'),  -- delay between fill polls
 
     -- Reject dust orders: a tiny notional gets eaten by fees / Alpaca minimums.
     (N'execution.min_notional',   N'1.0')
